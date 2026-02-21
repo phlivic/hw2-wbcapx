@@ -33,7 +33,7 @@ void wnd_bit_count_destruct(State* self) {
 }
 
 void wnd_bit_count_print(State* self) {
-    // TODO: useful for debugging
+    printf("window size: %u, count: %u\n", self->wnd_size, self->count);
 }
 
 uint32_t wnd_bit_count_next(State* self, bool item) {

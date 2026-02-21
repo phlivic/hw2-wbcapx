@@ -119,7 +119,10 @@ void wnd_bit_count_apx_destruct(StateApx* self) {
 }
 
 void wnd_bit_count_apx_print(StateApx* self) {
-    // useful for debugging
+    printf("levels: %u\n", self->max_level + 1);
+    for (uint32_t L = 0; L <= self->max_level; L++) {
+        printf("  level %u: %u buckets\n", L, self->level_count[L]);
+    }
 }
 
 uint32_t wnd_bit_count_apx_next(StateApx* self, bool item) {
