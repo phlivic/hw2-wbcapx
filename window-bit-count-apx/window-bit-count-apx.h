@@ -39,7 +39,7 @@ typedef struct {
     uint32_t max_level;
     uint32_t slots_per_level; // = k + 2
     uint32_t ts;
-    uint32_t total_sum;
+    uint32_t total_sum;       // running sum of all live bucket sizes
 
     package*  pack_buffer; // [max_level+1][slots_per_level]
     uint32_t* level_head;  // circular-buffer head per level
@@ -56,6 +56,7 @@ static inline package lb_front(StateApx* s, uint32_t L) {
     return lbuf(s, L)[s->level_head[L]];
 }
 
+// Remove and return the oldest bucket; advance head by 1 (mod slots_per_level).
 static inline package lb_pop_front(StateApx* s, uint32_t L) {
     package p = lbuf(s, L)[s->level_head[L]];
     s->level_head[L] = (s->level_head[L] + 1) % s->slots_per_level;
@@ -63,6 +64,7 @@ static inline package lb_pop_front(StateApx* s, uint32_t L) {
     return p;
 }
 
+// Append a bucket at the tail without moving any existing elements.
 static inline void lb_push_back(StateApx* s, uint32_t L, package p) {
     uint32_t tail = (s->level_head[L] + s->level_count[L]) % s->slots_per_level;
     lbuf(s, L)[tail] = p;
@@ -95,7 +97,8 @@ uint64_t wnd_bit_count_apx_new(StateApx* self, uint32_t wnd_size, uint32_t k) {
     size_t bytes_heads   = (size_t)num_levels * sizeof(uint32_t);
     size_t bytes_counts  = (size_t)num_levels * sizeof(uint32_t);
 
-    // single malloc for all three arrays
+    // Single malloc: all three arrays are packed into one contiguous block.
+    // pack_buffer sits at the start; level_head and level_count follow it.
     uint8_t* mem = (uint8_t*)malloc(bytes_buckets + bytes_heads + bytes_counts);
     self->pack_buffer = (package*)mem;
     self->level_head  = (uint32_t*)(mem + bytes_buckets);
@@ -110,7 +113,9 @@ uint64_t wnd_bit_count_apx_new(StateApx* self, uint32_t wnd_size, uint32_t k) {
 }
 
 void wnd_bit_count_apx_destruct(StateApx* self) {
-    free(self->pack_buffer); // frees the entire block
+    // pack_buffer points to the start of the single malloc block,
+    // so freeing it releases level_head and level_count as well.
+    free(self->pack_buffer);
 }
 
 void wnd_bit_count_apx_print(StateApx* self) {
@@ -121,6 +126,7 @@ uint32_t wnd_bit_count_apx_next(StateApx* self, bool item) {
     self->ts++;
 
     // 1. Expire: oldest bucket = front of highest non-empty level.
+    //    Higher levels always hold older buckets, so no linear scan needed.
     //    At most one bucket expires per step (window advances by 1).
     for (int L = (int)self->max_level; L >= 0; L--) {
         if (self->level_count[L] > 0) {
@@ -140,9 +146,10 @@ uint32_t wnd_bit_count_apx_next(StateApx* self, bool item) {
         lb_push_back(self, 0, p);
         self->total_sum += 1;
 
-        // 3. Merge cascade: if level L has k+2 buckets, merge the two
-        //    oldest into one size-doubled bucket at level L+1.
-        //    total_sum is unchanged: −s − s + 2s = 0.
+        // 3. Merge cascade: if level L has k+2 buckets, merge the two oldest
+        //    into one size-doubled bucket at level L+1.
+        //    Merged bucket takes the newer timestamp (most recent 1 inside it).
+        //    total_sum is unchanged by merges: −s − s + 2s = 0.
         for (uint32_t L = 0; L <= self->max_level; L++) {
             if (self->level_count[L] <= self->k + 1) break;
             assert(L < self->max_level);
@@ -157,9 +164,9 @@ uint32_t wnd_bit_count_apx_next(StateApx* self, bool item) {
         }
     }
 
-    // 4. Estimate = (sum of all buckets) − oldest_size + 1.
-    //    Oldest bucket may straddle the window boundary; count it as 1
-    //    (lower-bound) to guarantee apx <= exact.
+    // 4. Estimate = total_sum − oldest_size + 1.
+    //    The oldest bucket may straddle the window boundary, so we count it
+    //    as 1 (lower bound) to guarantee apx <= exact within error 1/k.
     if (self->total_sum == 0) return 0;
 
     uint32_t oldest_size = 0;
