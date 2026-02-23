@@ -1,8 +1,8 @@
 # Benchmark Results
 
-## 設定
+## Setup
 
-| 參數 | 值 |
+| Parameter | Value |
 |------|-----|
 | Stream length (N) | 150,000,000 |
 | Trials (T) | 5 |
@@ -12,7 +12,7 @@
 
 ---
 
-## Throughput（items/sec，5 trials 平均）
+## Throughput (items/sec, average of 5 trials)
 
 | W | exact | apx[k=10] | apx[k=100] | apx[k=1000] |
 |--:|------:|----------:|-----------:|------------:|
@@ -27,7 +27,7 @@
 
 ---
 
-## Memory Footprint（bytes）
+## Memory Footprint (bytes)
 
 | W | exact | apx[k=10] | apx[k=100] | apx[k=1000] |
 |--:|------:|----------:|-----------:|------------:|
@@ -42,17 +42,17 @@
 
 ---
 
-## 觀察
+## Observations
 
 ### Throughput
-- **exact** 在所有 W 下維持穩定的 ~370M items/sec，因為使用 circular buffer，每次操作都是 O(1)
-- **apx** 在 W 很小（W=10）時 throughput 較高（merge 幾乎不發生），隨 W 增大後穩定在 ~43–44M items/sec
-- **apx[k=1000]** 在小 W 時 throughput 較高，因為 k 大代表 bucket 允許更多，merge 較少發生
-- exact 的 throughput 約為 apx 的 **8–9 倍**，代價是記憶體隨 W 線性成長
+- **exact** maintains a stable ~370M items/sec across all W, because it uses a circular buffer and each operation is O(1).
+- **apx** has higher throughput when W is very small (W=10), where merges almost never occur; as W grows, it stabilizes around ~43-44M items/sec.
+- **apx[k=1000]** performs better at small W because larger k allows more buckets, resulting in fewer merges.
+- exact throughput is about **8-9x** higher than apx, at the cost of memory growing linearly with W.
 
 ### Memory
-- **exact** 記憶體 = W bytes，隨 W 線性成長（W=10^8 時需要 100 MB）
-- **apx** 記憶體 = O(k · log W)，增長極為緩慢
-  - apx[k=10]：W 從 10 增至 10^8，記憶體只從 104 bytes 增至 2,496 bytes
-  - apx[k=1000]：W=10^8 時僅需 136,408 bytes（約 133 KB），比 exact 少 **700 倍**
-- k 越大誤差越小，但記憶體用量也越多（k=1000 是 k=10 的約 55 倍）
+- **exact** memory = W bytes, growing linearly with W (at W=10^8, it requires 100 MB).
+- **apx** memory = O(k · log W), with very slow growth.
+  - apx[k=10]: as W increases from 10 to 10^8, memory only rises from 104 bytes to 2,496 bytes.
+  - apx[k=1000]: at W=10^8, it needs only 136,408 bytes (~133 KB), about **700x** less than exact.
+- Larger k reduces error but increases memory usage (k=1000 uses about 55x memory of k=10).

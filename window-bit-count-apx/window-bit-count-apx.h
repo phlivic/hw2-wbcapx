@@ -10,68 +10,34 @@
 
 uint64_t N_MERGES = 0; // keep track of how many bucket merges occur
 
-typedef struct {
+/*
+    TODO: You can add code here.
+*/
+
+typedef struct{
     uint32_t timestamp;
     uint32_t size;
 } package;
 
-/*
- * Each level L owns a circular buffer of (k+2) slots inside pack_buffer.
- * level_head[L]  = physical index of the oldest (front) bucket at level L.
- * level_count[L] = number of live buckets at level L.
- *
- * Higher levels always hold older (smaller-timestamp) buckets, so the
- * global oldest bucket is always the front of the highest non-empty level.
- * This lets expire run in O(1).  Insert and per-level merge are also O(1).
- *
- * total_sum is maintained incrementally:
- *   +1  on insert,  -expired.size  on expire,  0  on merge (−s−s+2s = 0).
- * Estimate = total_sum − oldest_size + 1  (oldest bucket counted as 1).
- *
- * Single malloc layout:
- *   [ pack_buffer : (max_level+1) × slots_per_level × sizeof(package) ]
- *   [ level_head  : (max_level+1) × sizeof(uint32_t)                  ]
- *   [ level_count : (max_level+1) × sizeof(uint32_t)                  ]
- */
 typedef struct {
     uint32_t wnd_size;
     uint32_t k;
-    uint32_t max_level;
-    uint32_t slots_per_level; // = k + 2
-    uint32_t ts;
-    uint32_t total_sum;       // running sum of all live bucket sizes
 
-    package*  pack_buffer; // [max_level+1][slots_per_level]
-    uint32_t* level_head;  // circular-buffer head per level
-    uint32_t* level_count; // live bucket count per level
+    package* pack_buffer;
+    
+    uint32_t ts;
+    uint32_t* level_counters;
+    uint32_t* level_pointers;
+    uint32_t max_level;
+
+    // To make this code faster.
+    uint32_t sum;
+    int32_t top;
 } StateApx;
 
-/* ---- circular-buffer helpers (per level) ---- */
-
-static inline package* lbuf(StateApx* s, uint32_t L) {
-    return s->pack_buffer + (size_t)L * s->slots_per_level;
+static inline package* find_level(StateApx* s, int level) {
+    return s->pack_buffer + (size_t)level * (s->k + 2);
 }
-
-static inline package lb_front(StateApx* s, uint32_t L) {
-    return lbuf(s, L)[s->level_head[L]];
-}
-
-// Remove and return the oldest bucket; advance head by 1 (mod slots_per_level).
-static inline package lb_pop_front(StateApx* s, uint32_t L) {
-    package p = lbuf(s, L)[s->level_head[L]];
-    s->level_head[L] = (s->level_head[L] + 1) % s->slots_per_level;
-    s->level_count[L]--;
-    return p;
-}
-
-// Append a bucket at the tail without moving any existing elements.
-static inline void lb_push_back(StateApx* s, uint32_t L, package p) {
-    uint32_t tail = (s->level_head[L] + s->level_count[L]) % s->slots_per_level;
-    lbuf(s, L)[tail] = p;
-    s->level_count[L]++;
-}
-
-/* ---- public API ---- */
 
 // k = 1/eps
 // if eps = 0.01 (relative error 1%) then k = 100
@@ -80,107 +46,130 @@ uint64_t wnd_bit_count_apx_new(StateApx* self, uint32_t wnd_size, uint32_t k) {
     assert(wnd_size >= 1);
     assert(k >= 1);
 
-    self->ts        = 0;
-    self->wnd_size  = wnd_size;
-    self->k         = k;
-    self->total_sum = 0;
+    self->ts = 0;
+    self->wnd_size = wnd_size;
+    self->k = k;
     self->max_level = 0;
 
+    self->sum = 0;
+    self->top = 0;
+
     uint64_t T = ((uint64_t)wnd_size - 1) / (uint64_t)k + 1;
-    while (((uint64_t)1 << (self->max_level + 1)) <= T)
+    while (((uint64_t)1 << (self->max_level + 1)) <= T) {
         self->max_level++;
-
-    self->slots_per_level = k + 2;
-    uint32_t num_levels = self->max_level + 1;
-
-    size_t bytes_buckets = (size_t)self->slots_per_level * num_levels * sizeof(package);
-    size_t bytes_heads   = (size_t)num_levels * sizeof(uint32_t);
-    size_t bytes_counts  = (size_t)num_levels * sizeof(uint32_t);
-
-    // Single malloc: all three arrays are packed into one contiguous block.
-    // pack_buffer sits at the start; level_head and level_count follow it.
-    uint8_t* mem = (uint8_t*)malloc(bytes_buckets + bytes_heads + bytes_counts);
-    self->pack_buffer = (package*)mem;
-    self->level_head  = (uint32_t*)(mem + bytes_buckets);
-    self->level_count = (uint32_t*)(mem + bytes_buckets + bytes_heads);
-
-    for (uint32_t L = 0; L < num_levels; L++) {
-        self->level_head[L]  = 0;
-        self->level_count[L] = 0;
     }
 
-    return (uint64_t)(bytes_buckets + bytes_heads + bytes_counts);
+    size_t buckets = (size_t)(self->k + 2) * (size_t)(self->max_level + 1) * sizeof(package);
+    size_t pointers  = (size_t)(self->max_level + 1) * sizeof(uint32_t);
+    size_t counters = (size_t)(self->max_level + 1) * sizeof(uint32_t);
+
+    uint8_t* mem = (uint8_t*)malloc(buckets + pointers + counters);
+
+    self->pack_buffer = (package*)mem;
+    self->level_pointers = (uint32_t*)(mem + buckets);
+    self->level_counters = (uint32_t*)(mem + buckets + pointers);
+
+    for (uint32_t lvl = 0; lvl <= self->max_level; lvl++ ) {
+        self->level_pointers[lvl] = 0;
+        self->level_counters[lvl] = 0;
+    }
+
+    uint64_t total_bytes = (uint64_t)(buckets + pointers + counters);
+
+    // The function should return the total number of bytes allocated on the heap.
+    return total_bytes;
 }
 
 void wnd_bit_count_apx_destruct(StateApx* self) {
-    // pack_buffer points to the start of the single malloc block,
-    // so freeing it releases level_head and level_count as well.
+    // Make sure you free the memory allocated on the heap.
     free(self->pack_buffer);
 }
 
 void wnd_bit_count_apx_print(StateApx* self) {
-    printf("levels: %u\n", self->max_level + 1);
+    // This is useful for debugging.
+    printf("Levels: %u\n", self->max_level + 1);
     for (uint32_t L = 0; L <= self->max_level; L++) {
-        printf("  level %u: %u buckets\n", L, self->level_count[L]);
+        printf("  Level %u: %u buckets\n", L, self->level_counters[L]);
     }
 }
 
 uint32_t wnd_bit_count_apx_next(StateApx* self, bool item) {
-    self->ts++;
+    // TODO: Fill me.
+    self->ts += 1;
+    uint32_t size = self->k + 2;
 
-    // 1. Expire: oldest bucket = front of highest non-empty level.
-    //    Higher levels always hold older buckets, so no linear scan needed.
-    //    At most one bucket expires per step (window advances by 1).
-    for (int L = (int)self->max_level; L >= 0; L--) {
-        if (self->level_count[L] > 0) {
-            if (self->ts - lb_front(self, L).timestamp >= self->wnd_size) {
-                package expired = lb_pop_front(self, (uint32_t)L);
-                self->total_sum -= expired.size;
+    // 1. Expire. We keep self->level_pointers[lvl] always points to the oldest package in one level.
+    for (int lvl = (int)self->max_level; lvl >= 0; lvl --){
+        if(self->level_counters[lvl] == 0) continue;
+        package* temp = find_level(self, lvl);
+        uint32_t p = self->level_pointers[lvl];
+        if (self->ts-temp[p].timestamp >= self->wnd_size){
+            // 4) Update.
+            self->sum -= temp[p].size;
+
+            self->level_pointers[lvl] = (p + 1) % size;
+            self->level_counters[lvl] -- ;
+
+            while (self->top >= 0 && self->level_counters[self->top] == 0) {
+                self->top--;
             }
-            break;
         }
+        break;
     }
 
-    // 2. Insert: new size-1 bucket at level 0.
-    if (item) {
-        package p;
-        p.timestamp = self->ts;
-        p.size      = 1;
-        lb_push_back(self, 0, p);
-        self->total_sum += 1;
+    // 2. Insert. Based on heads we can find tails.
+    if (item){
+        package *b = find_level(self, 0);
+        uint32_t t = (self->level_pointers[0] + self->level_counters[0]) % size;
+        b[t].timestamp = self->ts;
+        b[t].size = 1;
+        self->level_counters[0]++;
+        
+        // 4) Update.
+        self->sum ++;
+        if (self->top < 0) self->top = 0;
 
-        // 3. Merge cascade: if level L has k+2 buckets, merge the two oldest
-        //    into one size-doubled bucket at level L+1.
-        //    Merged bucket takes the newer timestamp (most recent 1 inside it).
-        //    total_sum is unchanged by merges: −s − s + 2s = 0.
-        for (uint32_t L = 0; L <= self->max_level; L++) {
-            if (self->level_count[L] <= self->k + 1) break;
-            assert(L < self->max_level);
+        // 3. Merge. Better when item = true to be faster.
+        for (uint32_t cur = 0; cur < self->max_level; cur++ ){
+            if (self->level_counters[cur] <= self->k + 1) {
+                break;
+            }
+            package* cur_lvl = find_level(self, cur);
+            uint32_t p0 = self->level_pointers[cur];
+            
+            //Delete old packages
+            package oldest = cur_lvl[p0];
+            p0 = (p0 + 1) % size;
+            package second = cur_lvl[p0];
+            p0 = (p0 + 1) % size;
+            self->level_pointers[cur] = p0;
+            self->level_counters[cur] -= 2;
+            
+            //Create new packages
+            package newP;
+            newP.timestamp = second.timestamp;
+            newP.size = second.size * 2;
 
-            package older = lb_pop_front(self, L); (void)older;
-            package newer = lb_pop_front(self, L);
-            package merged;
-            merged.timestamp = newer.timestamp;
-            merged.size      = newer.size * 2;
-            lb_push_back(self, L + 1, merged);
+            //Find new position for new package.
+            package* pos = find_level(self, cur + 1);
+            pos[(self->level_pointers[cur + 1] + 
+                self->level_counters[cur + 1]) % size] = newP;
+            self->level_counters[cur + 1] ++;
+
+            // 4) Update
+            if ((int)(cur + 1) > self->top) self->top = (int)(cur + 1);
+
             N_MERGES++;
         }
     }
 
-    // 4. Estimate = total_sum − oldest_size + 1.
-    //    The oldest bucket may straddle the window boundary, so we count it
-    //    as 1 (lower bound) to guarantee apx <= exact within error 1/k.
-    if (self->total_sum == 0) return 0;
-
-    uint32_t oldest_size = 0;
-    for (int L = (int)self->max_level; L >= 0; L--) {
-        if (self->level_count[L] > 0) {
-            oldest_size = lb_front(self, (uint32_t)L).size;
-            break;
-        }
+    // 4. Count all the "1"s.
+    if (self->sum == 0){
+        return 0;
     }
-
-    return self->total_sum - oldest_size + 1;
+    package* top = find_level(self, self->top);
+    // Oldest bucket is counted as 1.
+    return self->sum - top[self->level_pointers[self->top]].size + 1;
 }
 
 #endif // _WINDOW_BIT_COUNT_APX_
