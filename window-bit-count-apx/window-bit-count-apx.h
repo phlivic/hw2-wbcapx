@@ -20,17 +20,25 @@ typedef struct{
 } package;
 
 typedef struct {
+    // Window size and k
     uint32_t wnd_size;
     uint32_t k;
 
+    // The memory pointer for every package.
     package* pack_buffer;
     
-    uint32_t ts;
+    uint32_t ts; // Timestamp
+
+    // This will remember how many packages are in each level
     uint32_t* level_counters;
+
+    // Pointing to each level respectively.
     uint32_t* level_pointers;
+
+    // The theoretical maximum package size of this implementation.
     uint32_t max_level;
 
-    // To make this code faster.
+    // To make this code faster, record the sum and the largest package.
     uint32_t sum;
     int32_t top;
 } StateApx;
@@ -46,6 +54,7 @@ uint64_t wnd_bit_count_apx_new(StateApx* self, uint32_t wnd_size, uint32_t k) {
     assert(wnd_size >= 1);
     assert(k >= 1);
 
+    // Initialization
     self->ts = 0;
     self->wnd_size = wnd_size;
     self->k = k;
@@ -54,21 +63,25 @@ uint64_t wnd_bit_count_apx_new(StateApx* self, uint32_t wnd_size, uint32_t k) {
     self->sum = 0;
     self->top = 0;
 
+    // The method for calculating the max level in class
     uint64_t T = ((uint64_t)wnd_size - 1) / (uint64_t)k + 1;
     while (((uint64_t)1 << (self->max_level + 1)) <= T) {
         self->max_level++;
     }
 
+    // Allocate the memory once.
     size_t buckets = (size_t)(self->k + 2) * (size_t)(self->max_level + 1) * sizeof(package);
     size_t pointers  = (size_t)(self->max_level + 1) * sizeof(uint32_t);
     size_t counters = (size_t)(self->max_level + 1) * sizeof(uint32_t);
 
+    // This ensures that the displacement is accurate.
     uint8_t* mem = (uint8_t*)malloc(buckets + pointers + counters);
 
     self->pack_buffer = (package*)mem;
     self->level_pointers = (uint32_t*)(mem + buckets);
     self->level_counters = (uint32_t*)(mem + buckets + pointers);
 
+    // Another initialization
     for (uint32_t lvl = 0; lvl <= self->max_level; lvl++ ) {
         self->level_pointers[lvl] = 0;
         self->level_counters[lvl] = 0;
@@ -94,7 +107,6 @@ void wnd_bit_count_apx_print(StateApx* self) {
 }
 
 uint32_t wnd_bit_count_apx_next(StateApx* self, bool item) {
-    // TODO: Fill me.
     self->ts += 1;
     uint32_t size = self->k + 2;
 
@@ -129,7 +141,7 @@ uint32_t wnd_bit_count_apx_next(StateApx* self, bool item) {
         self->sum ++;
         if (self->top < 0) self->top = 0;
 
-        // 3. Merge. Better when item = true to be faster.
+        // 3. Merge. Only happens when "item = true" to be faster.
         for (uint32_t cur = 0; cur < self->max_level; cur++ ){
             if (self->level_counters[cur] <= self->k + 1) {
                 break;
@@ -137,7 +149,7 @@ uint32_t wnd_bit_count_apx_next(StateApx* self, bool item) {
             package* cur_lvl = find_level(self, cur);
             uint32_t p0 = self->level_pointers[cur];
             
-            //Delete old packages
+            // Delete old packages
             package oldest = cur_lvl[p0];
             p0 = (p0 + 1) % size;
             package second = cur_lvl[p0];
@@ -145,12 +157,12 @@ uint32_t wnd_bit_count_apx_next(StateApx* self, bool item) {
             self->level_pointers[cur] = p0;
             self->level_counters[cur] -= 2;
             
-            //Create new packages
+            // Create new packages
             package newP;
             newP.timestamp = second.timestamp;
             newP.size = second.size * 2;
 
-            //Find new position for new package.
+            // Find new position for new package.
             package* pos = find_level(self, cur + 1);
             pos[(self->level_pointers[cur + 1] + 
                 self->level_counters[cur + 1]) % size] = newP;
